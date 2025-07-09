@@ -16,10 +16,10 @@ API_HASH = "
 BOT_TOKEN = "
 
 # API ключи Яндекс
-GEOCODER_API_KEY = "faf599e3-9314-4d77-8fb6-f57ceee40a8d"
-STATIC_API_KEY = "c3bb8b19-3734-4838-a64c-0ec07d06ecd5"
-RASP_API_KEY = "00a64e8c-785c-4f57-ac55-9ced6d1f3ac4"
-RASP_API_BASE_URL = "https://api.rasp.yandex.net/v3.0"
+GEOCODER_API_KEY = ""
+STATIC_API_KEY = "c3bbd5"
+RASP_API_KEY = "00a64e8ac4"
+RASP_API_BASE_URL = "https:3.0"
 
 # Настройка логирования
 logging.basicConfig(
