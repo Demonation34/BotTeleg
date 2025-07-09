@@ -11,9 +11,9 @@ from pyrogram.types import (
 )
 
 # --- Конфигурация ---
-API_ID = 26868635
-API_HASH = "440784c574c8503d3a6596fdcd0954eb"
-BOT_TOKEN = "7542869234:AAEr_dH35-oYmftAFAzdgdKwSnr7HEpctLU"
+API_ID = 
+API_HASH = "
+BOT_TOKEN = "
 
 # API ключи Яндекс
 GEOCODER_API_KEY = "faf599e3-9314-4d77-8fb6-f57ceee40a8d"
