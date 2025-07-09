@@ -1,119 +1,228 @@
-import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, ConversationHandler, CallbackContext
+import logging
+import requests
+import re
+from pyrogram import Client, filters
+from pyrogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto,
+)
 
-# Определяем состояния разговора
-ASK, ANSWER = range(2)
+# --- Конфигурация ---
+API_ID = 26868635
+API_HASH = "440784c574c8503d3a6596fdcd0954eb"
+BOT_TOKEN = "7542869234:AAEr_dH35-oYmftAFAzdgdKwSnr7HEpctLU"
 
-def start(update: Update, context: CallbackContext) -> int:
-    update.message.reply_text(
-        "Привет! Загадай число от 1 до 100, а я попробую угадать его за 7 попыток.\n"
-        "Нажми любую кнопку, чтобы начать.",
-        reply_markup=ReplyKeyboardRemove()
+# API ключи Яндекс
+GEOCODER_API_KEY = "faf599e3-9314-4d77-8fb6-f57ceee40a8d"
+STATIC_API_KEY = "c3bb8b19-3734-4838-a64c-0ec07d06ecd5"
+RASP_API_KEY = "00a64e8c-785c-4f57-ac55-9ced6d1f3ac4"
+RASP_API_BASE_URL = "https://api.rasp.yandex.net/v3.0"
+
+# Настройка логирования
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+log = logging.getLogger(__name__)
+
+# Инициализация клиента Pyrogram
+app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+
+# --- Логика Яндекс API (остается без изменений) ---
+
+def get_station_code(station_name: str) -> str | None:
+    """Находит код станции по ее названию."""
+    url = f"{RASP_API_BASE_URL}/stations_list/"
+    params = {"apikey": RASP_API_KEY, "lang": "ru_RU", "format": "json"}
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        countries = response.json().get("countries", [])
+        for country in countries:
+            for region in country.get("regions", []):
+                for settlement in region.get("settlements", []):
+                    for station in settlement.get("stations", []):
+                        if station_name.lower() in station.get("title", "").lower():
+                            return station.get("codes", {}).get("yandex_code")
+    except requests.RequestException as e:
+        log.error(f"Ошибка при поиске кода станции: {e}")
+    return None
+
+def search_schedule(from_station: str, to_station: str, transport_type: str):
+    """Ищет расписание между двумя станциями."""
+    from_code = get_station_code(from_station)
+    to_code = get_station_code(to_station)
+    if not from_code or not to_code:
+        return None
+    params = {
+        "apikey": RASP_API_KEY, "format": "json", "from": from_code,
+        "to": to_code, "transport_types": transport_type, "limit": 10,
+    }
+    try:
+        response = requests.get(f"{RASP_API_BASE_URL}/search/", params=params)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        log.error(f"Ошибка при поиске расписания: {e}")
+        return None
+
+def get_coordinates_by_address(address: str) -> tuple[str, str] | None:
+    """Получает координаты по адресу через Яндекс.Геокодер."""
+    params = {"apikey": GEOCODER_API_KEY, "geocode": address, "format": "json"}
+    try:
+        response = requests.get("https://geocode-maps.yandex.ru/1.x/", params=params)
+        response.raise_for_status()
+        data = response.json()
+        pos = data["response"]["GeoObjectCollection"]["featureMember"][0]["GeoObject"]["Point"]["pos"]
+        return pos.split()
+    except (requests.RequestException, IndexError, KeyError) as e:
+        log.error(f"Ошибка при получении координат: {e}")
+        return None
+
+def get_static_map_url(lon, lat, zoom) -> str:
+    """Формирует URL для Яндекс.Static API."""
+    return (
+        f"https://static-maps.yandex.ru/1.x/?"
+        f"ll={lon},{lat}&z={zoom}&l=map&size=650,450&scale=1.5"
+        f"&pt={lon},{lat},pm2vvm&lang=ru_RU"
     )
-    # Инициализация начальных значений
-    context.user_data['low'] = 1
-    context.user_data['high'] = 100
-    context.user_data['attempts'] = 0
-    # Переход к состоянию ASK
-    return ask_guess(update, context)
 
-def ask_guess(update: Update, context: CallbackContext) -> int:
-    low = context.user_data['low']
-    high = context.user_data['high']
-    guess = (low + high) // 2
-    context.user_data['guess'] = guess
-    context.user_data['attempts'] += 1
 
-    # Создаем inline-клавиатуру с кнопками
-    keyboard = [
-        [
-            InlineKeyboardButton("Больше", callback_data='>'),
-            InlineKeyboardButton("Меньше", callback_data='<'),
-            InlineKeyboardButton("Угадал", callback_data='=')
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+# --- Клавиатуры ---
 
-    # Если update пришел из команды /start (сообщение), то отправляем новое сообщение.
-    # Если update является callback (например, при повторном запросе), то редактируем сообщение.
-    if update.callback_query:
-        update.callback_query.edit_message_text(
-            text=f"Попытка {context.user_data['attempts']}/7: Твое число равно {guess}?",
-            reply_markup=reply_markup
-        )
+def get_zoom_keyboard(lon, lat, zoom):
+    """Возвращает клавиатуру с кнопками зума."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("➕", callback_data=f"zoom_in:{lon}:{lat}:{zoom}"),
+        InlineKeyboardButton("➖", callback_data=f"zoom_out:{lon}:{lat}:{zoom}"),
+    ]])
+
+
+# --- Обработчики Pyrogram ---
+
+@app.on_message(filters.command("start"))
+async def start_command(client: Client, message: Message):
+    """Обработчик команды /start."""
+    user = message.from_user
+    await message.reply_html(
+        f"Привет, {user.mention}!\n\n"
+        f"Я многофункциональный бот! Вот что я умею:\n"
+        f"- <b>Карта по адресу:</b> Отправь мне адрес.\n"
+        f"- <b>Координаты:</b> Напиши 'координаты [адрес]'.\n"
+        f"- <b>Расписание электричек:</b> Напиши 'электричка [станция отпр.] - [станция приб.]'.\n"
+        f"- <b>Расписание автобусов:</b> Напиши 'автобус [номер] [станция отпр.] - [станция приб.]'."
+    )
+
+@app.on_message(filters.location)
+async def handle_location(client: Client, message: Message):
+    """Обработчик геолокации."""
+    location = message.location
+    log.info(f"Получена геолокация: {location.latitude}, {location.longitude}")
+    await send_map_for_coords(client, message, location.longitude, location.latitude)
+
+
+@app.on_message(filters.text & ~filters.command("start"))
+async def handle_text(client: Client, message: Message):
+    """Обработчик текстовых сообщений."""
+    text = message.text.lower()
+    log.info(f"Получено сообщение: {text}")
+
+    train_match = re.match(r"электричка\s+(.+?)\s*-\s*(.+)", text)
+    bus_match = re.match(r"автобус\s+(\d+)\s+(.+?)\s*-\s*(.+)", text)
+
+    if train_match:
+        from_station, to_station = train_match.groups()
+        schedule = search_schedule(from_station.strip(), to_station.strip(), "suburban")
+        if schedule and schedule.get("segments"):
+            response_text = f"<b>Расписание электричек от {from_station.title()} до {to_station.title()}:</b>\n"
+            for segment in schedule["segments"]:
+                departure_time = segment["departure"].split("T")[1][:5]
+                response_text += f"- Отправление в {departure_time}\n"
+            await message.reply_html(response_text)
+        else:
+            await message.reply_text("Не удалось найти расписание для этого маршрута.")
+
+    elif bus_match:
+        route_num, from_station, to_station = bus_match.groups()
+        schedule = search_schedule(from_station.strip(), to_station.strip(), "bus")
+        if schedule and schedule.get("segments"):
+            response_text = f"<b>Расписание автобуса №{route_num} от {from_station.title()} до {to_station.title()}:</b>\n"
+            for segment in schedule["segments"]:
+                if segment["thread"]["number"] == route_num:
+                    departure_time = segment["departure"].split("T")[1][:5]
+                    response_text += f"- Отправление в {departure_time}\n"
+            if len(response_text.splitlines()) > 1:
+                await message.reply_html(response_text)
+            else:
+                await message.reply_text(f"Не найдено рейсов для маршрута №{route_num}.")
+        else:
+            await message.reply_text("Не удалось найти расписание для этого маршрута.")
+
+    elif text.startswith("координаты "):
+        address = text[11:]
+        coords = get_coordinates_by_address(address)
+        if coords:
+            lon, lat = coords
+            await message.reply_text(f"Координаты для '{address}':\nДолгота: {lon}\nШирота: {lat}")
+        else:
+            await message.reply_text("Не удалось найти координаты.")
     else:
-        update.message.reply_text(
-            text=f"Попытка {context.user_data['attempts']}/7: Твое число равно {guess}?",
-            reply_markup=reply_markup
-        )
-    return ANSWER
+        await send_map_for_address(client, message, text)
 
-def handle_response(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()  # Обязательно отвечаем на callback, чтобы убрать "часики"
-    user_response = query.data
-    guess = context.user_data['guess']
-    attempts = context.user_data['attempts']
 
-    if user_response == '=':
-        query.edit_message_text(
-            text=f"Ура! Я угадал число {guess} за {attempts} попыток!"
-        )
-        return ConversationHandler.END
-
-    if user_response == '>':
-        context.user_data['low'] = guess + 1
-    elif user_response == '<':
-        context.user_data['high'] = guess - 1
-
-    # Проверяем, что диапазон корректный
-    if context.user_data['low'] > context.user_data['high']:
-        query.edit_message_text(
-            text="Что-то пошло не так – возможно, были ошибки в ответах. Попробуем сначала."
-        )
-        return ConversationHandler.END
-
-    if attempts >= 7:
-        query.edit_message_text(
-            text=f"Я не смог угадать число за 7 попыток. Ты победил! Загаданное число было где-то между {context.user_data['low']} и {context.user_data['high']}."
-        )
-        return ConversationHandler.END
-
-    # Следующий ход: спрашиваем снова с обновленным диапазоном
-    return ask_guess(update, context)
-
-def cancel(update: Update, context: CallbackContext) -> int:
-    update.message.reply_text(
-        "Игра отменена.", reply_markup=ReplyKeyboardRemove()
-    )
-    return ConversationHandler.END
-
-def main():
-    # Получаем токен из переменной окружения
-    token = os.getenv('TOKEN')
-    if not token:
-        print("Ошибка: не задан токен бота (TOKEN) в переменных окружения.")
+@app.on_callback_query()
+async def button_callback(client: Client, callback_query: CallbackQuery):
+    """Обработчик нажатий на инлайн-кнопки (зум)."""
+    log.info(f"Получены данные с кнопки: {callback_query.data}")
+    try:
+        action, lon_str, lat_str, zoom_str = callback_query.data.split(":")
+        lon, lat, zoom = float(lon_str), float(lat_str), int(zoom_str)
+        log.info(f"Распарсенные данные: action={action}, lon={lon}, lat={lat}, zoom={zoom}")
+    except ValueError as e:
+        log.error(f"Ошибка парсинга данных с кнопки: {e}")
+        await callback_query.answer("Ошибка!", show_alert=True)
         return
 
-    updater = Updater(token, use_context=True)
-    dispatcher = updater.dispatcher
+    if action == "zoom_in":
+        zoom = min(17, zoom + 1)
+    elif action == "zoom_out":
+        zoom = max(0, zoom - 1)
+    
+    log.info(f"Новый зум: {zoom}")
+    map_url = get_static_map_url(lon, lat, zoom)
+    log.info(f"Новый URL карты: {map_url}")
+    keyboard = get_zoom_keyboard(lon, lat, zoom)
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
-        states={
-            # Состояние ASK может обрабатываться как текстовое сообщение, так и callback-запрос
-            ASK: [CallbackQueryHandler(ask_guess)],
-            ANSWER: [CallbackQueryHandler(handle_response)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
+    await callback_query.edit_message_media(
+        media=InputMediaPhoto(media=map_url),
+        reply_markup=keyboard
     )
+    await callback_query.answer()
 
-    dispatcher.add_handler(conv_handler)
 
-    updater.start_polling()
-    print("Бот запущен...")
-    updater.idle()
+# --- Вспомогательные функции для отправки карт ---
 
-if __name__ == '__main__':
-    main()
+async def send_map_for_address(client: Client, message: Message, address: str):
+    """Находит координаты по адресу и отправляет карту."""
+    coords = get_coordinates_by_address(address)
+    if coords:
+        lon, lat = coords
+        await send_map_for_coords(client, message, lon, lat, caption=f"Карта для '{address}'")
+    else:
+        await message.reply_text("Не удалось найти это место.")
+
+async def send_map_for_coords(client: Client, message: Message, lon: float, lat: float, caption="Ваше местоположение"):
+    """Отправляет статическую карту по координатам с кнопками зума."""
+    zoom = 13
+    map_url = get_static_map_url(lon, lat, zoom)
+    keyboard = get_zoom_keyboard(lon, lat, zoom)
+    await message.reply_photo(photo=map_url, caption=caption, reply_markup=keyboard)
+
+
+if __name__ == "__main__":
+    print("Бот запускается...")
+    app.run()
+    print("Бот остановлен.")
